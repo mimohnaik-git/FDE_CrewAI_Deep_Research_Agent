@@ -1,312 +1,179 @@
-"""
-app.py
-------
-Streamlit front-end for the CrewAI Research -> Analyst -> Writer demo.
-
-Run with:
-    streamlit run app.py
-
-What it shows in class / in a client demo:
-  1. A sidebar to pick which LLM backs the crew — a paid OpenAI or
-     Anthropic key, or a free local Ollama model — with a live status
-     check so it's obvious which options are actually usable right now.
-  2. A text box where you paste/type a topic.
-  3. A live-updating log of what each agent is doing (thoughts, tool
-     calls, results) as the crew runs, in real time.
-  4. Once the crew finishes, the final article is streamed onto the
-     page word-by-word (like a typewriter / ChatGPT-style effect),
-     followed by a token-usage summary for the run.
-"""
+"""Streamlit front end with session credentials and safe operational events."""
 
 import os
-import time
 import queue
 import threading
 
 import streamlit as st
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
-from crew_setup import build_crew
-from llm_config import DEFAULT_MODELS, check_providers, resolve_provider
+from research.models import ResearchRequest
+from research.persistence import RunStore
+from research.providers import DEFAULT_MODELS, ProviderConfig, check_providers
+from research.search import FixtureSearch
+from research.service import run_research
 
-load_dotenv()
-
-st.set_page_config(page_title="CrewAI Demo — Research | Analyst | Writer", layout="wide")
-
-st.title("🤖 CrewAI Demo — Research → Analyze → Write")
-st.caption(
-    "Paste a topic below. Three agents (Researcher, Analyst, Writer) will work "
-    "on it one after another. You'll see their steps live, then the final "
-    "article streams in word by word."
-)
-
-# ----------------------------------------------------------------------
-# Session state
-# ----------------------------------------------------------------------
-defaults = {
-    "running": False,
-    "result": None,
-    "error": None,
-    "logs": [],
-    "log_queue": None,
-    "worker_thread": None,
-    "result_holder": None,
-    "stream_done": False,
-}
-for key, val in defaults.items():
+st.set_page_config(page_title="Deep Research Agent", layout="wide")
+st.title("Deep Research Agent")
+st.caption("Explicit retrieval → evidence → claim analysis → report → citation validation")
+settings = {**dotenv_values(".env"), **os.environ}
+for key, value in {"running": False, "state": None, "events": [], "queue": None}.items():
     if key not in st.session_state:
-        st.session_state[key] = val
+        st.session_state[key] = value
 
-# ----------------------------------------------------------------------
-# Sidebar: LLM provider picker
-# ----------------------------------------------------------------------
-st.sidebar.title("⚙️ Model")
-
-PROVIDER_LABELS = {
-    "auto": "Auto (use whichever is available)",
-    "openai": "OpenAI",
-    "anthropic": "Anthropic",
-    "ollama": "Ollama (free, local)",
-}
-provider_choice = st.sidebar.selectbox(
-    "LLM provider",
-    options=list(PROVIDER_LABELS.keys()),
-    format_func=lambda p: PROVIDER_LABELS[p],
-    index=0,
-    disabled=st.session_state.running,
-    help="Auto picks the first available option: OpenAI key -> Anthropic key -> local Ollama.",
-)
-
-statuses = {s.provider: s for s in check_providers()}
-icon = {"openai": "🟢", "anthropic": "🟣", "ollama": "🖥️"}
-for name in ("openai", "anthropic", "ollama"):
-    s = statuses[name]
-    mark = "✅" if s.available else "⚠️"
-    st.sidebar.caption(f"{icon[name]} **{PROVIDER_LABELS[name]}** {mark} — {s.detail}")
-
-with st.sidebar.expander("Add / change API keys"):
-    openai_key_input = st.text_input(
-        "OpenAI API key", value=os.environ.get("OPENAI_API_KEY", ""), type="password"
+mode = st.sidebar.selectbox("Research mode", ["offline", "web"], disabled=st.session_state.running)
+if mode == "offline":
+    st.info("Offline demo: frozen synthetic fixtures, no web research or paid model calls.")
+    case = st.sidebar.selectbox(
+        "Fixture",
+        ["corroboration", "single_source", "conflict", "unsupported", "injection"],
+        disabled=st.session_state.running,
     )
-    if openai_key_input:
-        os.environ["OPENAI_API_KEY"] = openai_key_input
-
-    anthropic_key_input = st.text_input(
-        "Anthropic API key", value=os.environ.get("ANTHROPIC_API_KEY", ""), type="password"
+    topic = FixtureSearch(case=case).case["topic"]
+    st.text_input("Topic", value=topic, disabled=True)
+    config, search_key = None, ""
+else:
+    case = "corroboration"
+    topic = st.text_area("Research topic", disabled=st.session_state.running)
+    provider = st.sidebar.selectbox(
+        "Model provider",
+        ["auto", "openai", "anthropic", "ollama"],
+        disabled=st.session_state.running,
     )
-    if anthropic_key_input:
-        os.environ["ANTHROPIC_API_KEY"] = anthropic_key_input
-
-    st.caption(
-        "No key handy? Install [Ollama](https://ollama.com), run "
-        "`ollama pull llama3.1`, then pick **Ollama (free, local)** above — "
-        "no API key or cost required."
+    model = st.sidebar.text_input(
+        "Model (optional)",
+        placeholder=DEFAULT_MODELS.get(provider, "Choose provider default"),
+        disabled=st.session_state.running,
     )
-
-active_provider = resolve_provider(provider_choice)
-model_override = st.sidebar.text_input(
-    "Model override (optional)",
-    value="",
-    placeholder=DEFAULT_MODELS[active_provider],
-    disabled=st.session_state.running,
-    help="Leave blank to use the provider's default model.",
-)
-
-# ----------------------------------------------------------------------
-# Input
-# ----------------------------------------------------------------------
-topic = st.text_area(
-    "Topic",
-    height=90,
-    placeholder="e.g. The impact of quantum computing on cybersecurity",
-    disabled=st.session_state.running,
-)
-
-run_clicked = st.button(
-    "🚀 Run Crew",
-    type="primary",
-    disabled=st.session_state.running or not topic.strip(),
-)
-
-
-# ----------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------
-def describe_step(step) -> str:
-    """Turn a CrewAI step object into a short, readable log line."""
-    agent_role = getattr(getattr(step, "agent", None), "role", None) or "Agent"
-
-    thought = getattr(step, "thought", None) or getattr(step, "text", None)
-    if thought:
-        return f"**{agent_role}**  {str(thought).strip()[:500]}"
-
-    tool = getattr(step, "tool", None)
-    if tool:
-        tool_input = getattr(step, "tool_input", "")
-        return f"**{agent_role}**  using tool `{tool}` → `{str(tool_input)[:200]}`"
-
-    result = getattr(step, "result", None) or getattr(step, "output", None)
-    if result:
-        return f"**{agent_role}**  {str(result).strip()[:500]}"
-
-    return f"**{agent_role}** {str(step).strip()[:500]}"
-
-
-def run_crew_worker(topic_text, prov, model, log_q, result_holder):
-    """Runs in a background thread so Streamlit's UI thread stays responsive."""
-
-    def step_callback(step):
-        try:
-            log_q.put(describe_step(step))
-        except Exception as exc:  # keep the crew running even if logging fails
-            log_q.put(f"[log formatting error: {exc}]")
-
-    try:
-        crew, provider_name, model_name = build_crew(
-            topic_text, step_callback=step_callback, provider=prov, model=model or None
+    with st.sidebar.expander("Session credentials"):
+        openai_key = st.text_input(
+            "OpenAI key",
+            value=settings.get("OPENAI_API_KEY", ""),
+            type="password",
+            key="openai_key",
         )
-        result_holder["provider"] = provider_name
-        result_holder["model"] = model_name
-        log_q.put(f"__PROVIDER__:{provider_name}:{model_name}")
-
-        final_output = crew.kickoff()
-        result_holder["output"] = str(final_output)
-
-        if crew.usage_metrics:
-            result_holder["usage"] = crew.usage_metrics.model_dump()
-    except Exception as exc:
-        result_holder["error"] = str(exc)
-    finally:
-        log_q.put("__DONE__")
-
-
-def word_stream(text: str, delay: float = 0.03):
-    """Yield the text word by word for st.write_stream()."""
-    for word in text.split(" "):
-        yield word + " "
-        time.sleep(delay)
-
-
-# ----------------------------------------------------------------------
-# Kick off a run
-# ----------------------------------------------------------------------
-if run_clicked and topic.strip():
-    st.session_state.running = True
-    st.session_state.result = None
-    st.session_state.error = None
-    st.session_state.logs = []
-    st.session_state.log_queue = queue.Queue()
-    st.session_state.result_holder = {}
-    st.session_state.stream_done = False
-
-    thread = threading.Thread(
-        target=run_crew_worker,
-        args=(
-            topic.strip(),
-            provider_choice,
-            model_override.strip(),
-            st.session_state.log_queue,
-            st.session_state.result_holder,
-        ),
-        daemon=True,
+        anthropic_key = st.text_input(
+            "Anthropic key",
+            value=settings.get("ANTHROPIC_API_KEY", ""),
+            type="password",
+            key="anthropic_key",
+        )
+        search_key = st.text_input(
+            "Serper search key",
+            value=settings.get("SERPER_API_KEY", ""),
+            type="password",
+            key="search_key",
+        )
+    config = ProviderConfig(
+        provider=provider,
+        model=model or None,
+        openai_key=openai_key,
+        anthropic_key=anthropic_key,
+        ollama_url=settings.get("OLLAMA_BASE_URL", "http://localhost:11434"),
     )
-    st.session_state.worker_thread = thread
-    thread.start()
-    st.rerun()
+    probe = st.sidebar.button("Check local Ollama")
+    for status in check_providers(config, probe_local=probe):
+        st.sidebar.caption(f"{status.provider}: {status.status} — {status.detail}")
+    st.caption(
+        "Web mode retrieves search excerpts. Citation integrity does not prove factual accuracy."
+    )
 
-# ----------------------------------------------------------------------
-# While running: drain the queue and show live agent activity
-# ----------------------------------------------------------------------
-if st.session_state.running:
-    st.subheader("🔍 Agent activity (live)")
-    status_placeholder = st.status("Crew is working...", expanded=True)
-    log_box = status_placeholder.container()
 
-    for line in st.session_state.logs:
-        if line.startswith("__PROVIDER__:"):
-            _, prov, mod = line.split(":", 2)
-            log_box.caption(f"Running on **{prov}** / `{mod}`")
-        else:
-            log_box.markdown(line)
+def worker(request, config, search_key, case, channel, db):
+    try:
+        state = run_research(
+            request,
+            RunStore(db),
+            config,
+            search_key,
+            case,
+            lambda message: channel.put(("event", message)),
+        )
+        channel.put(("done", state))
+    except Exception:
+        channel.put(("error", "Run failed during persistence or initialization"))
 
-    q = st.session_state.log_queue
-    thread = st.session_state.worker_thread
-    finished = False
 
-    while True:
-        try:
-            item = q.get(timeout=0.2)
-        except queue.Empty:
-            if not thread.is_alive():
-                finished = True
-                break
-            continue
-
-        if item == "__DONE__":
-            finished = True
-            break
-
-        st.session_state.logs.append(item)
-        if item.startswith("__PROVIDER__:"):
-            _, prov, mod = item.split(":", 2)
-            log_box.caption(f"Running on **{prov}** / `{mod}`")
-        else:
-            log_box.markdown(item)
-
-    if finished:
-        rh = st.session_state.result_holder
-        st.session_state.running = False
-        if "error" in rh:
-            st.session_state.error = rh["error"]
-            status_placeholder.update(label="Crew failed ❌", state="error", expanded=True)
-        else:
-            st.session_state.result = rh.get("output", "")
-            st.session_state.run_meta = {
-                "provider": rh.get("provider"),
-                "model": rh.get("model"),
-                "usage": rh.get("usage"),
-            }
-            status_placeholder.update(label="Crew finished ✅", state="complete", expanded=False)
+if st.button(
+    "Run research", type="primary", disabled=st.session_state.running or len(topic.strip()) < 3
+):
+    try:
+        request = ResearchRequest(topic=topic, mode=mode)
+    except ValueError:
+        st.error("Enter a topic between 3 and 1000 characters.")
+    else:
+        channel = queue.Queue()
+        st.session_state.update(running=True, state=None, events=[], queue=channel)
+        threading.Thread(
+            target=worker,
+            args=(
+                request,
+                config,
+                search_key,
+                case,
+                channel,
+                settings.get("RESEARCH_DB", "data/research.sqlite3"),
+            ),
+            daemon=True,
+        ).start()
         st.rerun()
 
-# ----------------------------------------------------------------------
-# Show any error
-# ----------------------------------------------------------------------
-if st.session_state.error:
-    st.error(f"Crew run failed: {st.session_state.error}")
-    if "OPENAI_API_KEY" in st.session_state.error or "ANTHROPIC_API_KEY" in st.session_state.error:
-        st.info("Add a key in the sidebar, or switch to **Ollama (free, local)** if you have it installed.")
-    elif "Ollama" in st.session_state.error:
-        st.info("Ollama isn't reachable — install it from https://ollama.com, run `ollama serve`, "
-                "then `ollama pull llama3.1`, or switch to an OpenAI/Anthropic key in the sidebar.")
 
-# ----------------------------------------------------------------------
-# Final article, streamed word by word
-# ----------------------------------------------------------------------
-if st.session_state.result and not st.session_state.running:
-    meta = st.session_state.get("run_meta", {})
-    if meta.get("provider"):
-        st.caption(f"Generated with **{meta['provider']}** / `{meta['model']}`")
+@st.fragment(run_every=0.5)
+def activity():
+    if st.session_state.queue:
+        while True:
+            try:
+                kind, payload = st.session_state.queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "event":
+                st.session_state.events.append(payload)
+            elif kind == "done":
+                st.session_state.state = payload
+                st.session_state.running = False
+                st.rerun()
+            elif kind == "error":
+                st.session_state.events.append(payload)
+                st.session_state.running = False
+                st.session_state.queue = None
+                st.rerun()
+    if st.session_state.events:
+        with st.expander("Workflow activity", expanded=st.session_state.running):
+            for event in st.session_state.events:
+                st.text(event)
 
-    st.subheader("📝 Final Article")
-    if not st.session_state.get("stream_done"):
-        st.write_stream(word_stream(st.session_state.result))
-        st.session_state.stream_done = True
-    else:
-        st.markdown(st.session_state.result)
 
-    usage = meta.get("usage")
-    if usage:
-        with st.expander("📊 Token usage for this run"):
-            cols = st.columns(4)
-            cols[0].metric("Prompt tokens", usage.get("prompt_tokens", 0))
-            cols[1].metric("Completion tokens", usage.get("completion_tokens", 0))
-            cols[2].metric("Total tokens", usage.get("total_tokens", 0))
-            cols[3].metric("LLM calls", usage.get("successful_requests", 0))
-
-    st.download_button(
-        "⬇️ Download article (.md)",
-        data=st.session_state.result,
-        file_name="article.md",
-        mime="text/markdown",
+activity()
+state = st.session_state.state
+if state:
+    st.caption(f"Run {state.id} • {state.provider} / {state.model} • {state.status}")
+    if state.status == "failed":
+        st.error(state.failure_reason)
+    report_tab, sources_tab, evidence_tab, metrics_tab = st.tabs(
+        ["Report", "Sources", "Evidence and claims", "Metrics"]
+    )
+    with report_tab:
+        if state.report and state.report.citation_integrity and state.status == "completed":
+            st.success(
+                "Citation integrity passed. Review evidence and uncertainty before relying on findings."
+            )
+            st.markdown(state.report.markdown)
+            st.download_button(
+                "Download Markdown",
+                state.report.markdown,
+                file_name=f"research-{state.id}.md",
+                mime="text/markdown",
+            )
+    with sources_tab:
+        st.dataframe([s.model_dump(mode="json") for s in state.sources])
+    with evidence_tab:
+        st.dataframe([e.model_dump() for e in state.evidence])
+        st.dataframe([c.model_dump() for c in state.claims])
+    with metrics_tab:
+        st.json(state.metrics.model_dump())
+        st.caption("Null token values mean unavailable; offline mode makes zero model calls.")
+with st.expander("Recent persisted runs"):
+    st.dataframe(
+        RunStore(settings.get("RESEARCH_DB", "data/research.sqlite3")).recent(), column_order=None
     )

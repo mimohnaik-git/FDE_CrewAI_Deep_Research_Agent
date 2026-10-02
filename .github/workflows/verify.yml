@@ -1,0 +1,28 @@
+name: Verify deep research
+on:
+  push:
+    branches: [feat/deep-research-rebuild]
+  pull_request:
+jobs:
+  offline-verification:
+    runs-on: ubuntu-latest
+    env:
+      CREWAI_TELEMETRY_ENABLED: 'false'
+      CREWAI_TRACING_ENABLED: 'false'
+      OTEL_SDK_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.22'
+          enable-cache: true
+      - run: uv sync --locked --python 3.13
+      - run: uv run --locked ruff check .
+      - run: uv run --locked ruff format --check .
+      - run: uv run --locked pytest -q
+      - run: uv run --locked python -m compileall -q research app.py crew_setup.py llm_config.py
+      - run: uv run --locked python -c "import research.workflow, crew_setup, llm_config"
+      - run: uv run --locked python -m research.evaluation --output data/evaluation.json
+      - run: uv run --locked python -m research.cli --db data/offline.sqlite3
+      - run: uv run --locked python scripts/check_secrets.py
+      - run: git diff --check
