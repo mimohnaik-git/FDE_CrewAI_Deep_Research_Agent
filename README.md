@@ -20,8 +20,7 @@ uv run --locked streamlit run app.py
 ```
 
 `pyproject.toml` defines the package; `uv.lock` pins the complete dependency graph,
-including development tools. `.python-version` selects 3.13. The compatibility
-`requirements.txt` installs the package without the lock; prefer uv for reproducibility.
+including development tools. `.python-version` selects 3.13. Use `uv sync --locked` for reproducible installation from `pyproject.toml` and `uv.lock`.
 
 The default UI is an offline demo and requires no credentials. Select a frozen
 fixture and run it. The topic is intentionally fixed to the selected dataset;

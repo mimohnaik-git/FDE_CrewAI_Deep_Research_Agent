@@ -1,2 +1,0 @@
-# Compatibility installation only; uv sync --locked is the reproducible path.
--e .
