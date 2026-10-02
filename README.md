@@ -120,5 +120,5 @@ authentication, per-user run isolation, cancellation, crawl/PDF ingestion, resum
 runs or production deployment is implemented. Reports need human review. Do not
 enter credentials into research topics or source content; those are persisted data.
 
-Work remains on `feat/deep-research-rebuild`; `prototype-baseline-v1` preserves the
-prototype. No history rewrite, main-branch changes or pushes are part of this rebuild.
+The rebuild is merged into `main`. The `prototype-baseline-v1` tag preserves the
+prototype baseline.

@@ -1,8 +1,10 @@
 name: Verify deep research
 on:
   push:
-    branches: [feat/deep-research-rebuild]
+    branches: [main]
   pull_request:
+permissions:
+  contents: read
 jobs:
   offline-verification:
     runs-on: ubuntu-latest
