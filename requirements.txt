@@ -1,12 +1,2 @@
-# Tested against crewai 1.15.x / streamlit 1.62.x. Kept as open ranges (with
-# an upper bound) rather than pinned exact versions so security patches are
-# picked up automatically, without risking a breaking major-version upgrade.
-crewai>=0.86.0,<2.0.0
-streamlit>=1.38.0,<2.0.0
-python-dotenv>=1.0.1,<2.0.0
-httpx>=0.27,<1.0.0
-
-# Anthropic and Ollama both run through crewai's built-in LiteLLM routing
-# (crewai.LLM(model="anthropic/..."` / `model="ollama/...")), so no extra
-# provider SDKs are required beyond crewai itself. Ollama also needs the
-# free Ollama runtime installed separately: https://ollama.com
+# Compatibility installation only; uv sync --locked is the reproducible path.
+-e .

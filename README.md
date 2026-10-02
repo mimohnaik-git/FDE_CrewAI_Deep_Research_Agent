@@ -1,119 +1,124 @@
-# CrewAI Demo — Research → Analyst → Writer (Streamlit UI)
+# Deep Research Agent
 
-- **Researcher** — gathers raw facts on your topic
-- **Analyst** — turns raw facts into structured insights
-- **Writer** — turns insights into a polished ~500-word article
+A rebuild of the CrewAI Research → Analyst → Writer prototype with explicit
+retrieval, evidence provenance, structured outputs, claim status, citation
+validation and SQLite run history. Streamlit, OpenAI/Anthropic/Ollama selection,
+live operational events, usage visibility and Markdown download are retained.
 
-The UI shows each agent's steps live as they run, then streams the final
-article onto the page **word by word**.
+This is a portfolio research application, not a production service or a factual
+accuracy guarantee. Web mode currently researches **search excerpts**, not full
+webpages. Offline mode uses clearly labeled synthetic fixtures.
 
-Runs on **OpenAI, Anthropic, or a free local Ollama model** — pick whichever
-you have in the sidebar, or leave it on **Auto** and it'll use the first one
-that's actually available. This makes the demo work in front of a client
-even if they don't want to hand over an API key: switch to Ollama and it
-runs at zero cost, fully offline after the model is pulled.
+## Setup
 
-```
-crewai_research_writer/
-├── app.py            # Streamlit front-end (topic input, live trace, provider picker)
-├── crew_setup.py      # Agents, tasks, and the Crew
-├── llm_config.py       # Picks OpenAI / Anthropic / Ollama and builds the LLM
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
+Use **Python 3.13** (the project excludes 3.14). Install
+[uv](https://docs.astral.sh/uv/getting-started/installation/), then from this repository:
+
+```sh
+uv sync --locked --python 3.13
+uv run --locked streamlit run app.py
 ```
 
-## 1. Setup (in VS Code)
+`pyproject.toml` defines the package; `uv.lock` pins the complete dependency graph,
+including development tools. `.python-version` selects 3.13. The compatibility
+`requirements.txt` installs the package without the lock; prefer uv for reproducibility.
 
-Open this folder in VS Code, then in the integrated terminal:
+The default UI is an offline demo and requires no credentials. Select a frozen
+fixture and run it. The topic is intentionally fixed to the selected dataset;
+offline mode does not answer arbitrary questions from model memory.
 
-```bash
-# 1. Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
+## Web search and model configuration
 
-# 2. Install dependencies
-pip install -r requirements.txt
+Copy `.env.example` to `.env` or enter keys in the UI's session credential fields.
+Never commit `.env`. The application reads dotenv values without loading them into
+process environment. UI-entered credentials are passed explicitly to clients.
 
-# 3. Add your API key (only one of these is required — see below)
-cp .env.example .env
-# then edit .env and paste your OPENAI_API_KEY or ANTHROPIC_API_KEY
-```
+Web mode requires `SERPER_API_KEY` plus a configured model provider:
 
-## 2. Pick a model — pick whichever you have
-
-You do **not** need all three. The app auto-detects what's usable:
-
-| Provider | Cost | Setup |
+| Provider | Configuration | Default model |
 |---|---|---|
-| **OpenAI** | Paid | Set `OPENAI_API_KEY` (in `.env` or the sidebar). Default model: `gpt-4o-mini`. |
-| **Anthropic** | Paid | Set `ANTHROPIC_API_KEY` (in `.env` or the sidebar). Default model: `claude-haiku-4-5`. |
-| **Ollama** | Free, local | Install [Ollama](https://ollama.com), run `ollama serve`, then `ollama pull llama3.1`. No key needed. |
+| OpenAI | `OPENAI_API_KEY` | `gpt-4o-mini` |
+| Anthropic | `ANTHROPIC_API_KEY` | `anthropic/claude-haiku-4-5-20251001` |
+| Ollama | Local server and installed model | `ollama/llama3.1` |
 
-The sidebar shows a live ✅ / ⚠️ status for all three so you always know
-what's about to run — useful when you're troubleshooting live in front of
-someone. Set `LLM_PROVIDER=openai|anthropic|ollama` in `.env` to pin one
-explicitly instead of auto-detecting, and `LLM_MODEL` to override the
-default model for whichever provider is active.
+`LLM_PROVIDER=auto` chooses a configured OpenAI key, then Anthropic, then reachable
+local Ollama. It fails when none is available. `LLM_MODEL` or the UI model field
+can override defaults. Ollama is restricted to a loopback HTTP endpoint, default
+`http://localhost:11434`; install Ollama separately and pull the selected model.
+The UI exposes an intentional local reachability check. A cloud key's presence
+means **configured**, not authenticated or verified. Live provider authentication
+and model availability have not been exercised by the offline test suite.
 
-## 3. Run the app
+Serper is called through a replaceable `SearchAdapter` protocol. It returns URL,
+title and excerpt metadata. HTTP failures are bounded with retries only for
+transient network errors, 429 and server errors; there is no silent fallback.
+Queries and excerpts are sent to the chosen remote services in web mode.
 
-```bash
-streamlit run app.py
+## Architecture
+
+`ResearchRequest` → CrewAI Flow planning → explicit search → normalization and
+URL/content deduplication → exact-quote evidence extraction → claim analysis →
+cross-source status assignment → synthesis/report writing → deterministic
+citation validation → persisted final report.
+
+CrewAI agents perform semantic planning, extraction, analysis and writing in web
+mode. Ordinary Python controls validation, IDs, provenance, retrieval, transitions,
+metrics, persistence and evaluation. Frozen scripted reasoning replaces model
+calls in offline mode, while exercising the same Flow and integrity checks.
+
+Important claims with support from only one source domain are partially supported;
+two domains meet the corroboration threshold. Contradictions and missing evidence
+have separate statuses. Domain counts are a heuristic, not proof of independent
+publishers or factual truth. Every report section names its claim IDs; rendered
+claim statements include citations and their status. Free-form synthesis is
+model-authored and cannot be semantically verified by the citation checker.
+
+See [architecture](docs/ARCHITECTURE.md), [evaluation](docs/EVALUATION.md) and
+[security](docs/SECURITY.md).
+
+## Run and verify
+
+```sh
+uv run --locked python -m research.cli --case corroboration --db data/offline.sqlite3
+uv run --locked pytest -q
+uv run --locked python -m research.evaluation --output data/evaluation.json
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked python -m compileall -q research app.py crew_setup.py llm_config.py
+uv run --locked python -c "import research.workflow, crew_setup, llm_config"
+uv run --locked python scripts/check_secrets.py
+git diff --check
 ```
 
-This opens `http://localhost:8501` in your browser.
+Evaluation includes corroboration, single-source support, conflict, unsupported
+claims, duplicate URLs and injected instructions inside source text, plus expected
+retrieval failure. Metrics come from execution; no external factual benchmark is
+claimed. Default tests strip provider/search keys and block application networking.
+Windows asyncio's internal socketpair is the only network-block exemption.
 
-## 4. Demo it in class / to a client
+GitHub Actions performs a locked clean install, lint/format, tests, compile/import,
+evaluation, offline run, secret checks and diff checks without API credentials.
 
-1. Check the sidebar — confirm which provider is active (or add a key /
-   switch to Ollama right there if it isn't).
-2. Paste a topic into the text box, e.g.
-   `"The impact of quantum computing on cybersecurity"`.
-3. Click **🚀 Run Crew**.
-4. Point out the **live "Agent activity" panel** — you can literally watch
-   the Researcher, then the Analyst, then the Writer think and work,
-   one step at a time. The panel also shows which model is running.
-5. When the crew finishes, the **final article streams onto the page word
-   by word**, like a typewriter — great visual payoff for a demo.
-6. Expand **📊 Token usage for this run** to show exactly how many tokens
-   and LLM calls the run cost — handy for a cost conversation with a client.
-7. Use the **Download article (.md)** button to show the exportable output.
+## Persistence and limitations
 
-## How the live steps work
+`RESEARCH_DB` defaults to `data/research.sqlite3`. SQLite stores run metadata,
+normalized sources, exact quotes, claim status, metrics and validated report
+content. Failed runs retain a safe failure category and never offer report export.
+The UI shows recent run summaries; it does not yet reopen old reports.
 
-CrewAI lets you pass a `step_callback` to each `Agent`. Every time an agent
-thinks, calls a tool, or gets a result, that callback fires. In
-`crew_setup.py` all three agents share the same callback, which is wired
-up in `app.py` to push a short description of each step into a
-`queue.Queue`. The Crew itself runs in a background thread (so the UI
-doesn't freeze), while the main Streamlit thread drains the queue and
-renders each new line live inside a `st.status(...)` panel.
+Tokens are recorded when CrewAI provides usage; null means unknown. Search-call
+counts measure logical queries, not retry attempts. Latency measures workflow time.
+Tracing/telemetry are disabled and CrewAI storage is kept under ignored `data/`.
+CrewAI itself may initialize per-user credential storage during import even with
+tracing disabled; sandboxed Windows verification redirected LOCALAPPDATA locally.
 
-## How the word-by-word streaming works
+Limitations: search snippets can omit context; source dates/publisher ownership
+are not independently verified; semantic evidence relevance and synthesis can be
+wrong; domain corroboration cannot guarantee independence; injection tests prove
+fixed workflow/tool boundaries, not universal model resistance. No hosted-service
+authentication, per-user run isolation, cancellation, crawl/PDF ingestion, resumable
+runs or production deployment is implemented. Reports need human review. Do not
+enter credentials into research topics or source content; those are persisted data.
 
-Once `crew.kickoff()` returns the final article text, `app.py` uses a small
-generator (`word_stream`) that `yield`s one word at a time with a short
-`time.sleep()` between them, fed straight into Streamlit's built-in
-`st.write_stream(...)`.
-
-## How provider switching works
-
-`llm_config.py` resolves a provider (openai / anthropic / ollama) and model,
-then builds a single `crewai.LLM(...)` object which is passed as `llm=` to
-every `Agent`. Since CrewAI routes all three providers through the same
-LiteLLM interface, swapping providers is just a different `model=` string —
-`"gpt-4o-mini"`, `"anthropic/claude-haiku-4-5-20251001"`, or
-`"ollama/llama3.1"` — no other code changes needed.
-
-## Extending the demo
-
-- **Give the Researcher a real web-search tool**: install `crewai-tools`,
-  add `SERPER_API_KEY` to `.env`, and pass
-  `tools=[SerperDevTool()]` to the `researcher` Agent in `crew_setup.py`.
-- **Swap in a different topic UI**: e.g. add a dropdown of sample topics
-  for a faster live demo if you're worried about API latency.
-- **Add more providers**: `llm_config.py` is intentionally small — add a
-  branch to `get_llm()` and a default model entry in `DEFAULT_MODELS` for
-  any other LiteLLM-supported provider (Azure, Bedrock, Gemini, etc.).
+Work remains on `feat/deep-research-rebuild`; `prototype-baseline-v1` preserves the
+prototype. No history rewrite, main-branch changes or pushes are part of this rebuild.
