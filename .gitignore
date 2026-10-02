@@ -22,5 +22,3 @@ venv/
 data/
 .env.*
 !.env.example
-
-.venv-fresh/
