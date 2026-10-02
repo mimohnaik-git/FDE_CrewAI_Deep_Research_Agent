@@ -84,8 +84,8 @@ uv run --locked pytest -q
 uv run --locked python -m research.evaluation --output data/evaluation.json
 uv run --locked ruff check .
 uv run --locked ruff format --check .
-uv run --locked python -m compileall -q research app.py crew_setup.py llm_config.py
-uv run --locked python -c "import research.workflow, crew_setup, llm_config"
+uv run --locked python -m compileall -q research app.py
+uv run --locked python -c "import research.workflow, research.reasoning, research.providers"
 uv run --locked python scripts/check_secrets.py
 git diff --check
 ```

@@ -1,8 +1,8 @@
 # Architecture
 
-The prototype entry files remain: `app.py` is Streamlit, `crew_setup.py` re-exports
-the research Flow and CrewAI reasoner, and `llm_config.py` re-exports provider
-configuration. The old implicit model-memory research path has been replaced.
+`app.py` is the Streamlit entry point. Research workflow, reasoning, retrieval,
+provider configuration, provenance, persistence and evaluation logic live in the
+`research/` package. The old implicit model-memory research path has been replaced.
 
 ```text
 Validated request
