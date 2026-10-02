@@ -14,3 +14,13 @@ venv/
 
 # Streamlit
 .streamlit/secrets.toml
+
+.bootstrap/
+.python/
+.pytest_cache/
+.ruff_cache/
+data/
+.env.*
+!.env.example
+
+.venv-fresh/
